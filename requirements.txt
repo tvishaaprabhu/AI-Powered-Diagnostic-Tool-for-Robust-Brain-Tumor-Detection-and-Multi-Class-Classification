@@ -6,3 +6,4 @@ opencv-python-headless
 pydicom
 scikit-learn
 matplotlib
+tensorflow
