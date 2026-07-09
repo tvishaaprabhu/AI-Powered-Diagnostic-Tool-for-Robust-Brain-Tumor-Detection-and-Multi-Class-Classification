@@ -6,6 +6,7 @@ import numpy as np
 import cv2
 import tensorflow as tf
 import streamlit as st
+from typing import Tuple
 
 # Class order matches what flow_from_directory assigns alphabetically
 CLASS_NAMES = {
@@ -35,7 +36,6 @@ def preprocess(image_array: np.ndarray) -> np.ndarray:
     resizes to 128x128, converts to grayscale, normalizes to [0,1].
     Returns shape (1, 128, 128, 1) — ready for model input.
     """
-    # Convert to grayscale if RGB
     if len(image_array.shape) == 3 and image_array.shape[2] == 3:
         image_array = cv2.cvtColor(image_array, cv2.COLOR_RGB2GRAY)
     elif len(image_array.shape) == 3 and image_array.shape[2] == 4:
@@ -43,18 +43,17 @@ def preprocess(image_array: np.ndarray) -> np.ndarray:
 
     resized = cv2.resize(image_array, (128, 128))
     normalized = resized.astype(np.float32) / 255.0
-    # Shape: (1, 128, 128, 1)
     return np.expand_dims(np.expand_dims(normalized, axis=-1), axis=0)
 
 
-def predict(model, input_tensor: np.ndarray) -> tuple[str, float, np.ndarray]:
+def predict(model, input_tensor: np.ndarray) -> Tuple[str, float, np.ndarray]:
     """
     Run forward pass. Returns:
     - predicted class name (str)
-    - confidence score (float, 0–1)
+    - confidence score (float, 0-1)
     - full probability array (np.ndarray of shape (4,))
     """
-    probs = model.predict(input_tensor, verbose=0)[0]  # shape (4,)
+    probs = model.predict(input_tensor, verbose=0)[0]
     class_idx = int(np.argmax(probs))
     return CLASS_NAMES[class_idx], float(probs[class_idx]), probs
 
@@ -66,45 +65,55 @@ def get_gradcam(model, input_tensor: np.ndarray, class_idx: int) -> np.ndarray:
     Returns a colorized RGB heatmap as uint8 numpy array (128x128x3).
     """
     def _single_gradcam(layer_name: str) -> np.ndarray:
-        # Build a sub-model that outputs (target_layer, final_output)
-        grad_model = tf.keras.models.Model(
-            inputs=model.input,
-            outputs=[model.get_layer(layer_name).output, model.output]
-        )
-        with tf.GradientTape() as tape:
-            layer_output, predictions = grad_model(input_tensor)
-            target_class_score = predictions[:, class_idx]
+        try:
+            grad_model = tf.keras.models.Model(
+                inputs=model.input,
+                outputs=[model.get_layer(layer_name).output, model.output]
+            )
+            with tf.GradientTape() as tape:
+                layer_output, predictions = grad_model(input_tensor)
+                target_class_score = predictions[:, class_idx]
 
-        # Gradients of target class score w.r.t. conv layer output
-        grads = tape.gradient(target_class_score, layer_output)
+            grads = tape.gradient(target_class_score, layer_output)
 
-        # Pool gradients across spatial dimensions → importance weights
-        pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+            # Guard against None gradients
+            if grads is None:
+                return np.zeros((4, 4))
 
-        # Weight the channels by their importance
-        layer_output = layer_output[0]
-        heatmap = layer_output @ pooled_grads[..., tf.newaxis]
-        heatmap = tf.squeeze(heatmap).numpy()
+            pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+            layer_output = layer_output[0]
+            heatmap = layer_output @ pooled_grads[..., tf.newaxis]
+            heatmap = tf.squeeze(heatmap).numpy()
 
-        # ReLU + normalize to [0,1]
-        heatmap = np.maximum(heatmap, 0)
-        if heatmap.max() > 0:
-            heatmap /= heatmap.max()
+            # Guard against scalar or empty output
+            if heatmap.ndim == 0 or heatmap.size == 0:
+                return np.zeros((4, 4))
 
-        return heatmap
+            # Ensure 2D
+            if heatmap.ndim > 2:
+                heatmap = heatmap.reshape(heatmap.shape[0], -1)
+            elif heatmap.ndim == 1:
+                side = max(1, int(np.sqrt(heatmap.size)))
+                heatmap = heatmap[:side*side].reshape(side, side)
 
-    # Get heatmaps from both backbones
+            # ReLU + normalize
+            heatmap = np.maximum(heatmap, 0)
+            if heatmap.max() > 0:
+                heatmap /= heatmap.max()
+
+            return heatmap
+
+        except Exception:
+            return np.zeros((4, 4))
+
     vgg_heatmap = _single_gradcam(VGG_LAYER)
     resnet_heatmap = _single_gradcam(RESNET_LAYER)
 
-    # Resize both to 128x128
-    vgg_heatmap = cv2.resize(vgg_heatmap, (128, 128))
-    resnet_heatmap = cv2.resize(resnet_heatmap, (128, 128))
+    vgg_heatmap = cv2.resize(vgg_heatmap.astype(np.float32), (128, 128))
+    resnet_heatmap = cv2.resize(resnet_heatmap.astype(np.float32), (128, 128))
 
-    # Blend equally (50/50) from both backbones
     blended = cv2.addWeighted(vgg_heatmap, 0.5, resnet_heatmap, 0.5, 0)
 
-    # Colorize with JET colormap
     blended_uint8 = np.uint8(255 * blended)
     colorized = cv2.applyColorMap(blended_uint8, cv2.COLORMAP_JET)
     colorized_rgb = cv2.cvtColor(colorized, cv2.COLOR_BGR2RGB)
@@ -119,9 +128,7 @@ def overlay_gradcam(original_gray: np.ndarray, heatmap_rgb: np.ndarray, alpha=0.
     heatmap_rgb: 3D array (128x128x3)
     Returns: blended RGB image (128x128x3) as uint8
     """
-    # Convert grayscale to RGB for blending
     orig_uint8 = np.uint8(original_gray * 255)
     orig_rgb = cv2.cvtColor(orig_uint8, cv2.COLOR_GRAY2RGB)
-
     overlay = cv2.addWeighted(orig_rgb, 1 - alpha, heatmap_rgb, alpha, 0)
     return overlay
