@@ -7,4 +7,4 @@ pydicom
 scikit-learn
 matplotlib
 tensorflow-cpu
-streamlit-drawable-canvas
+streamlit-drawable-canvas==0.9.3
