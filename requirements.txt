@@ -1,10 +1,14 @@
 streamlit
-pandas
+tensorflow-cpu
 numpy
+pandas
 Pillow
 opencv-python-headless
 pydicom
 scikit-learn
 matplotlib
-tensorflow-cpu
+torch
+torchvision
 streamlit-drawable-canvas==0.9.3
+git+https://github.com/facebookresearch/segment-anything.git
+git+https://github.com/bowang-lab/MedSAM.git
