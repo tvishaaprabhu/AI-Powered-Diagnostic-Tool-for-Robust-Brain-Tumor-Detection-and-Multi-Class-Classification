@@ -3,7 +3,7 @@ tensorflow-cpu
 numpy
 pandas
 Pillow
-opencv-python
+opencv-python-headless
 pydicom
 scikit-learn
 matplotlib
