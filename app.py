@@ -285,11 +285,17 @@ if uploaded_file is not None:
 
                 st.info("Draw a bounding box around the tumor region, then click **Run MedSAM**.")
 
+                # Save PIL image to bytes and reload to avoid URL conversion bug
+                buf_canvas = io.BytesIO()
+                display_pil.save(buf_canvas, format="PNG")
+                buf_canvas.seek(0)
+                bg_image = Image.open(buf_canvas)
+                
                 canvas_result = st_canvas(
                     fill_color="rgba(255, 0, 0, 0.1)",
                     stroke_width=3,
                     stroke_color="#00ffff",
-                    background_image=display_pil,
+                    background_image=bg_image,
                     update_streamlit=True,
                     height=CANVAS_H,
                     width=CANVAS_W,
