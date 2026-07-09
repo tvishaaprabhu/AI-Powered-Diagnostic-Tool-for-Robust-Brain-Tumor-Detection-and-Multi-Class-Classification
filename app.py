@@ -210,7 +210,7 @@ if uploaded_file is not None:
 
     try:
         from predict import load_model, preprocess, predict, get_gradcam, overlay_gradcam, CLASS_NAMES
-        MODEL_PATH = "multiclass_tumor_predictor.keras"
+        MODEL_PATH = "final_model.keras"
         model = load_model(MODEL_PATH)
         model_loaded = True
     except Exception as e:
