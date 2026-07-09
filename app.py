@@ -23,7 +23,31 @@ if uploaded_file is not None:
 
     if is_dicom:
         dicom = pydicom.dcmread(uploaded_file)
-        img_array = dicom.pixel_array.squeeze()
+        pixel_array = dicom.pixel_array.squeeze()
+
+        # Handle multi-slice DICOM
+        if len(pixel_array.shape) == 3:
+            n_slices = pixel_array.shape[0]
+            st.subheader("Multi-Slice DICOM")
+
+            if "slice_idx" not in st.session_state:
+                st.session_state.slice_idx = 0
+
+            col_prev, col_slider, col_next = st.columns([1, 8, 1])
+            with col_prev:
+                if st.button("◀"):
+                    st.session_state.slice_idx = max(0, st.session_state.slice_idx - 1)
+            with col_slider:
+                st.session_state.slice_idx = st.slider("Slice", 0, n_slices - 1, st.session_state.slice_idx)
+            with col_next:
+                if st.button("▶"):
+                    st.session_state.slice_idx = min(n_slices - 1, st.session_state.slice_idx + 1)
+
+            st.caption(f"Slice {st.session_state.slice_idx + 1} of {n_slices}")
+            img_array = pixel_array[st.session_state.slice_idx]
+        else:
+            img_array = pixel_array
+
         img_array = cv2.normalize(img_array, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
         width, height = img_array.shape[1], img_array.shape[0]
 
@@ -210,12 +234,12 @@ if uploaded_file is not None:
 
     try:
         from predict import load_model, preprocess, predict, get_gradcam, overlay_gradcam, CLASS_NAMES
-        MODEL_PATH = "brain_tumor_classifier.keras"
+        MODEL_PATH = "brain_tumor_detector.keras"
         model = load_model(MODEL_PATH)
         model_loaded = True
     except Exception as e:
         st.error(f"Could not load model: {e}")
-        st.info("Make sure `multiclass_tumor_predictor.keras` and `predict.py` are in the same folder as `app.py`.")
+        st.info("Make sure `brain_tumor_classifier.keras` and `predict.py` are in the same folder as `app.py`.")
         model_loaded = False
 
     if model_loaded:
@@ -225,7 +249,6 @@ if uploaded_file is not None:
         with st.spinner("Running diagnosis..."):
             class_name, confidence, all_probs = predict(model, input_tensor)
 
-        # Map class name to CLASS_LABELS key format for consistency
         detected_class = class_name.lower().replace(" ", "")
 
         st.subheader("Prediction")
@@ -268,11 +291,9 @@ if uploaded_file is not None:
                 "on the scan below, then click **Run MedSAM**."
             )
 
-            # Prepare RGB image for canvas display
             img_rgb = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
             h_orig, w_orig = img_rgb.shape[:2]
 
-            # Use streamlit-drawable-canvas for bounding box input
             try:
                 from streamlit_drawable_canvas import st_canvas
 
@@ -285,12 +306,11 @@ if uploaded_file is not None:
 
                 st.info("Draw a bounding box around the tumor region, then click **Run MedSAM**.")
 
-                # Save PIL image to bytes and reload to avoid URL conversion bug
                 buf_canvas = io.BytesIO()
                 display_pil.save(buf_canvas, format="PNG")
                 buf_canvas.seek(0)
                 bg_image = Image.open(buf_canvas)
-                
+
                 canvas_result = st_canvas(
                     fill_color="rgba(255, 0, 0, 0.1)",
                     stroke_width=3,
@@ -323,33 +343,30 @@ if uploaded_file is not None:
                             st.caption(f"Bounding box (original coords): {bbox.tolist()}")
 
                             try:
+                                import os
                                 import torch
                                 from segment_anything import sam_model_registry
 
-                                checkpoint_path = "work_dir/MedSAM/medsam_vit_b.pth"
+                                checkpoint_path = "medsam_vit_b.pth"
                                 if not os.path.exists(checkpoint_path):
-                                    st.error("MedSAM checkpoint not found at `work_dir/MedSAM/medsam_vit_b.pth`.")
+                                    st.error("MedSAM checkpoint not found. Make sure `medsam_vit_b.pth` is in your repo root.")
                                 else:
                                     with st.spinner("Running MedSAM segmentation..."):
                                         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-                                        # Load MedSAM
                                         medsam = sam_model_registry["vit_b"](checkpoint=checkpoint_path)
                                         medsam.to(device)
                                         medsam.eval()
 
-                                        # Scale image to 1024x1024
                                         img_1024 = cv2.resize(img_rgb, (1024, 1024))
                                         img_1024_normalized = (img_1024 - img_1024.min()) / (img_1024.max() - img_1024.min() + 1e-10)
                                         img_tensor = torch.tensor(img_1024_normalized, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0).to(device)
 
-                                        # Scale bbox to 1024x1024 space
                                         scale_x_sam = 1024 / w_orig
                                         scale_y_sam = 1024 / h_orig
                                         scaled_bbox = bbox * np.array([scale_x_sam, scale_y_sam, scale_x_sam, scale_y_sam])
                                         box_tensor = torch.tensor(scaled_bbox, dtype=torch.float32).unsqueeze(0).to(device)
 
-                                        # MedSAM encoder-decoder
                                         with torch.no_grad():
                                             image_embedding = medsam.image_encoder(img_tensor)
                                             sparse_embeddings, dense_embeddings = medsam.prompt_encoder(
@@ -363,7 +380,6 @@ if uploaded_file is not None:
                                                 multimask_output=False,
                                             )
 
-                                        # Resize mask back to original image dimensions
                                         low_res_np = low_res_masks.squeeze().cpu().numpy()
                                         mask = cv2.resize(
                                             (low_res_np > 0.0).astype(np.uint8),
@@ -371,20 +387,17 @@ if uploaded_file is not None:
                                             interpolation=cv2.INTER_NEAREST
                                         )
 
-                                        # Draw bounding box on original
                                         box_img = img_rgb.copy()
                                         cv2.rectangle(box_img, (x_min, y_min), (x_max, y_max), (0, 255, 255), 3)
 
-                                        # Draw segmentation overlay
                                         overlay_img = img_rgb.copy()
                                         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                                         if np.sum(mask) > 0:
                                             color_mask = np.zeros_like(overlay_img)
-                                            color_mask[mask > 0] = [255, 0, 162]  # Magenta tint
+                                            color_mask[mask > 0] = [255, 0, 162]
                                             overlay_img = cv2.addWeighted(overlay_img, 0.75, color_mask, 0.25, 0)
-                                            cv2.drawContours(overlay_img, contours, -1, (0, 255, 0), 2)  # Green border
+                                            cv2.drawContours(overlay_img, contours, -1, (0, 255, 0), 2)
 
-                                    # Display results
                                     st.subheader("Segmentation Result")
                                     col1, col2 = st.columns(2)
                                     with col1:
@@ -392,7 +405,6 @@ if uploaded_file is not None:
                                     with col2:
                                         st.image(overlay_img, caption="2. MedSAM Target Segmentation", use_container_width=True)
 
-                                    # Compute and display metrics
                                     if contours:
                                         largest_contour = max(contours, key=cv2.contourArea)
                                         tumor_pixel_count = np.sum(mask == 1)
@@ -411,7 +423,6 @@ if uploaded_file is not None:
                                         m3.metric("Height", f"{height_val:.2f} {unit}")
                                         m4.metric("Max Diameter", f"{max_dia_val:.2f} {unit}")
 
-                                    # Download button
                                     buf_seg = io.BytesIO()
                                     Image.fromarray(overlay_img).save(buf_seg, format="PNG")
                                     st.download_button(
