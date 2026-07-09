@@ -228,7 +228,7 @@ if uploaded_file is not None:
 
     try:
         from predict import load_model, preprocess, predict, get_gradcam, overlay_gradcam, CLASS_NAMES
-        MODEL_PATH = "brain_tumor_classifier.keras"
+        MODEL_PATH = "brain_tumor_detector.keras"
         model = load_model(MODEL_PATH)
         model_loaded = True
     except Exception as e:
