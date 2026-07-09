@@ -275,3 +275,20 @@ if uploaded_file is not None:
 
 else:
     st.info("Please upload an image to see it displayed here.")
+
+from bbox_component import draw_bbox
+
+if detected_class != "notumor":
+    st.header("6. Tumor Segmentation (MedSAM)")
+    st.caption(f"A **{class_name}** was detected. Draw a bounding box around the tumor below.")
+
+    img_rgb = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
+    bbox = draw_bbox(img_rgb, key="medsam")
+
+    run_medsam = st.button("Run MedSAM")
+    if run_medsam:
+        if bbox is None:
+            st.warning("Please draw and confirm a bounding box first.")
+        else:
+            st.success(f"Bounding box: {bbox}")
+            # MedSAM code goes here
