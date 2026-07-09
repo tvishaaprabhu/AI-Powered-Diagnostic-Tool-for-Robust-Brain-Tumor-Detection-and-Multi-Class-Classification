@@ -8,10 +8,8 @@ import io
 import pydicom
 from sklearn.cluster import KMeans
 import matplotlib.pyplot as plt
-from streamlit_drawable_canvas import st_canvas
 
 st.set_page_config(page_title="Medical Image Viewer", layout="wide")
-
 st.title("My Streamlit Image Viewer")
 
 # ==========================================
@@ -27,14 +25,11 @@ if uploaded_file is not None:
         dicom = pydicom.dcmread(uploaded_file)
         pixel_array = dicom.pixel_array.squeeze()
 
-        # Handle multi-slice DICOM
         if len(pixel_array.shape) == 3:
             n_slices = pixel_array.shape[0]
             st.subheader("Multi-Slice DICOM")
-
             if "slice_idx" not in st.session_state:
                 st.session_state.slice_idx = 0
-
             col_prev, col_slider, col_next = st.columns([1, 8, 1])
             with col_prev:
                 if st.button("◀"):
@@ -44,7 +39,6 @@ if uploaded_file is not None:
             with col_next:
                 if st.button("▶"):
                     st.session_state.slice_idx = min(n_slices - 1, st.session_state.slice_idx + 1)
-
             st.caption(f"Slice {st.session_state.slice_idx + 1} of {n_slices}")
             img_array = pixel_array[st.session_state.slice_idx]
         else:
@@ -62,7 +56,7 @@ if uploaded_file is not None:
                 "Pixel Spacing", "Slice Thickness", "Bits Stored"
             ],
             "Value": [
-                uploaded_file.name, width, height, "DICOM",
+                str(uploaded_file.name), str(width), str(height), "DICOM",
                 str(getattr(dicom, "PatientName", "N/A")),
                 str(getattr(dicom, "PatientID", "N/A")),
                 str(getattr(dicom, "Modality", "N/A")),
@@ -87,14 +81,14 @@ if uploaded_file is not None:
     else:
         img = Image.open(uploaded_file)
         img_array = np.array(img.convert("L")).squeeze()
-        format_label = img.format
+        format_label = str(img.format)
         width, height = img.size
         pixel_spacing_mm = 1.0
 
         st.subheader("Image Summary")
         data = {
             "Attribute": ["File Name", "Width (pixels)", "Height (pixels)", "Format"],
-            "Value": [uploaded_file.name, width, height, format_label]
+            "Value": [str(uploaded_file.name), str(width), str(height), format_label]
         }
         df = pd.DataFrame(data)
         st.dataframe(df, hide_index=True, use_container_width=False)
@@ -232,8 +226,6 @@ if uploaded_file is not None:
     # ==========================================
     st.header("5. AI Diagnosis")
 
-    CLASS_LABELS = {0: 'glioma', 1: 'meningioma', 2: 'notumor', 3: 'pituitary'}
-
     try:
         from predict import load_model, preprocess, predict, get_gradcam, overlay_gradcam, CLASS_NAMES
         MODEL_PATH = "brain_tumor_classifier.keras"
@@ -288,154 +280,130 @@ if uploaded_file is not None:
         # ==========================================
         if detected_class != "notumor":
             st.header("6. Tumor Segmentation (MedSAM)")
-            st.caption(
-                f"A **{class_name}** was detected. Draw a bounding box around the tumor "
-                "region on the scan below, then click **Run MedSAM**."
-            )
 
             img_rgb = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
             h_orig, w_orig = img_rgb.shape[:2]
 
-            CANVAS_W = 512
-            CANVAS_H = int(h_orig * (CANVAS_W / w_orig))
-            scale_x = w_orig / CANVAS_W
-            scale_y = h_orig / CANVAS_H
+            st.caption(f"A **{class_name}** was detected. Use the Grad-CAM heatmap above to identify the tumor region, then enter its bounding box coordinates below.")
+            st.image(img_rgb, caption=f"Scan — {w_orig} x {h_orig} px", use_container_width=True)
 
-            # Convert to PNG bytes for canvas background
-            pil_img = Image.fromarray(img_rgb).resize((CANVAS_W, CANVAS_H))
-            buf_bg = io.BytesIO()
-            pil_img.save(buf_bg, format="PNG")
-            buf_bg.seek(0)
-            bg_pil = Image.open(buf_bg).copy()  # .copy() forces full load before BytesIO closes
+            st.info("Enter the bounding box coordinates around the tumor region, then click **Run MedSAM**.")
 
-            st.info("Draw a bounding box around the tumor region, then click **Run MedSAM**.")
+            col_a, col_b = st.columns(2)
+            with col_a:
+                x_min = st.number_input("X min", min_value=0, max_value=w_orig, value=int(w_orig * 0.2))
+                y_min = st.number_input("Y min", min_value=0, max_value=h_orig, value=int(h_orig * 0.2))
+            with col_b:
+                x_max = st.number_input("X max", min_value=0, max_value=w_orig, value=int(w_orig * 0.8))
+                y_max = st.number_input("Y max", min_value=0, max_value=h_orig, value=int(h_orig * 0.8))
 
-            canvas_result = st_canvas(
-                fill_color="rgba(0, 255, 255, 0.1)",
-                stroke_width=3,
-                stroke_color="#00ffff",
-                background_image=bg_pil,
-                update_streamlit=True,
-                height=CANVAS_H,
-                width=CANVAS_W,
-                drawing_mode="rect",
-                key="medsam_canvas",
-            )
+            # Show preview of bounding box on scan
+            preview_img = img_rgb.copy()
+            cv2.rectangle(preview_img, (x_min, y_min), (x_max, y_max), (0, 255, 255), 3)
+            st.image(preview_img, caption="Bounding box preview", use_container_width=True)
 
             run_medsam = st.button("Run MedSAM")
 
             if run_medsam:
-                if canvas_result.json_data is not None:
-                    objects = canvas_result.json_data.get("objects", [])
-                    rects = [o for o in objects if o.get("type") == "rect"]
+                if x_min >= x_max or y_min >= y_max:
+                    st.warning("Invalid bounding box — make sure X min < X max and Y min < Y max.")
+                else:
+                    bbox = np.array([x_min, y_min, x_max, y_max])
+                    st.caption(f"Bounding box: {bbox.tolist()}")
 
-                    if not rects:
-                        st.warning("No bounding box detected. Please draw a box around the tumor first.")
-                    else:
-                        r = rects[-1]
-                        x_min = int(r["left"] * scale_x)
-                        y_min = int(r["top"] * scale_y)
-                        x_max = int((r["left"] + r["width"]) * scale_x)
-                        y_max = int((r["top"] + r["height"]) * scale_y)
-                        bbox = np.array([x_min, y_min, x_max, y_max])
+                    try:
+                        import torch
+                        from segment_anything import sam_model_registry
 
-                        st.caption(f"Bounding box: {bbox.tolist()}")
+                        checkpoint_path = "medsam_vit_b.pth"
+                        if not os.path.exists(checkpoint_path):
+                            st.error("MedSAM checkpoint not found. Make sure `medsam_vit_b.pth` is in the repo root.")
+                        else:
+                            with st.spinner("Running MedSAM segmentation..."):
+                                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-                        try:
-                            import torch
-                            from segment_anything import sam_model_registry
+                                medsam = sam_model_registry["vit_b"](checkpoint=checkpoint_path)
+                                medsam.to(device)
+                                medsam.eval()
 
-                            checkpoint_path = "medsam_vit_b.pth"
-                            if not os.path.exists(checkpoint_path):
-                                st.error("MedSAM checkpoint not found. Make sure `medsam_vit_b.pth` is in the repo root.")
-                            else:
-                                with st.spinner("Running MedSAM segmentation..."):
-                                    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                                img_1024 = cv2.resize(img_rgb, (1024, 1024))
+                                img_1024_normalized = (img_1024 - img_1024.min()) / (img_1024.max() - img_1024.min() + 1e-10)
+                                img_tensor = torch.tensor(img_1024_normalized, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0).to(device)
 
-                                    medsam = sam_model_registry["vit_b"](checkpoint=checkpoint_path)
-                                    medsam.to(device)
-                                    medsam.eval()
+                                scale_x_sam = 1024 / w_orig
+                                scale_y_sam = 1024 / h_orig
+                                scaled_bbox = bbox * np.array([scale_x_sam, scale_y_sam, scale_x_sam, scale_y_sam])
+                                box_tensor = torch.tensor(scaled_bbox, dtype=torch.float32).unsqueeze(0).to(device)
 
-                                    img_1024 = cv2.resize(img_rgb, (1024, 1024))
-                                    img_1024_normalized = (img_1024 - img_1024.min()) / (img_1024.max() - img_1024.min() + 1e-10)
-                                    img_tensor = torch.tensor(img_1024_normalized, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0).to(device)
-
-                                    scale_x_sam = 1024 / w_orig
-                                    scale_y_sam = 1024 / h_orig
-                                    scaled_bbox = bbox * np.array([scale_x_sam, scale_y_sam, scale_x_sam, scale_y_sam])
-                                    box_tensor = torch.tensor(scaled_bbox, dtype=torch.float32).unsqueeze(0).to(device)
-
-                                    with torch.no_grad():
-                                        image_embedding = medsam.image_encoder(img_tensor)
-                                        sparse_embeddings, dense_embeddings = medsam.prompt_encoder(
-                                            points=None, boxes=box_tensor, masks=None
-                                        )
-                                        low_res_masks, _ = medsam.mask_decoder(
-                                            image_embeddings=image_embedding,
-                                            image_pe=medsam.prompt_encoder.get_dense_pe(),
-                                            sparse_prompt_embeddings=sparse_embeddings,
-                                            dense_prompt_embeddings=dense_embeddings,
-                                            multimask_output=False,
-                                        )
-
-                                    low_res_np = low_res_masks.squeeze().cpu().numpy()
-                                    mask = cv2.resize(
-                                        (low_res_np > 0.0).astype(np.uint8),
-                                        (w_orig, h_orig),
-                                        interpolation=cv2.INTER_NEAREST
+                                with torch.no_grad():
+                                    image_embedding = medsam.image_encoder(img_tensor)
+                                    sparse_embeddings, dense_embeddings = medsam.prompt_encoder(
+                                        points=None, boxes=box_tensor, masks=None
+                                    )
+                                    low_res_masks, _ = medsam.mask_decoder(
+                                        image_embeddings=image_embedding,
+                                        image_pe=medsam.prompt_encoder.get_dense_pe(),
+                                        sparse_prompt_embeddings=sparse_embeddings,
+                                        dense_prompt_embeddings=dense_embeddings,
+                                        multimask_output=False,
                                     )
 
-                                    box_img = img_rgb.copy()
-                                    cv2.rectangle(box_img, (x_min, y_min), (x_max, y_max), (0, 255, 255), 3)
-
-                                    overlay_img = img_rgb.copy()
-                                    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                                    if np.sum(mask) > 0:
-                                        color_mask = np.zeros_like(overlay_img)
-                                        color_mask[mask > 0] = [255, 0, 162]
-                                        overlay_img = cv2.addWeighted(overlay_img, 0.75, color_mask, 0.25, 0)
-                                        cv2.drawContours(overlay_img, contours, -1, (0, 255, 0), 2)
-
-                                st.subheader("Segmentation Result")
-                                col1, col2 = st.columns(2)
-                                with col1:
-                                    st.image(box_img, caption="1. Your Bounding Box Prompt", use_container_width=True)
-                                with col2:
-                                    st.image(overlay_img, caption="2. MedSAM Target Segmentation", use_container_width=True)
-
-                                if contours:
-                                    largest_contour = max(contours, key=cv2.contourArea)
-                                    tumor_pixel_count = np.sum(mask == 1)
-                                    tumor_area = tumor_pixel_count * (pixel_spacing_mm ** 2)
-                                    _, _, w_c, h_c = cv2.boundingRect(largest_contour)
-                                    width_val = w_c * pixel_spacing_mm
-                                    height_val = h_c * pixel_spacing_mm
-                                    (_, _), radius = cv2.minEnclosingCircle(largest_contour)
-                                    max_dia_val = (radius * 2) * pixel_spacing_mm
-                                    unit = "mm" if pixel_spacing_mm != 1.0 else "pixels"
-
-                                    st.subheader("Tumor Metrics")
-                                    m1, m2, m3, m4 = st.columns(4)
-                                    m1.metric("Area", f"{tumor_area:.2f} {unit}²")
-                                    m2.metric("Width", f"{width_val:.2f} {unit}")
-                                    m3.metric("Height", f"{height_val:.2f} {unit}")
-                                    m4.metric("Max Diameter", f"{max_dia_val:.2f} {unit}")
-
-                                buf_seg = io.BytesIO()
-                                Image.fromarray(overlay_img).save(buf_seg, format="PNG")
-                                st.download_button(
-                                    label="Download Segmentation Result",
-                                    data=buf_seg.getvalue(),
-                                    file_name="segmentation_" + uploaded_file.name.rsplit(".", 1)[0] + ".png",
-                                    mime="image/png"
+                                low_res_np = low_res_masks.squeeze().cpu().numpy()
+                                mask = cv2.resize(
+                                    (low_res_np > 0.0).astype(np.uint8),
+                                    (w_orig, h_orig),
+                                    interpolation=cv2.INTER_NEAREST
                                 )
 
-                        except ImportError:
-                            st.error("MedSAM not installed. Add it to requirements.txt.")
-                        except Exception as e:
-                            st.error(f"MedSAM error: {e}")
-                else:
-                    st.warning("Please draw a bounding box before running MedSAM.")
+                                box_img = img_rgb.copy()
+                                cv2.rectangle(box_img, (x_min, y_min), (x_max, y_max), (0, 255, 255), 3)
+
+                                overlay_img = img_rgb.copy()
+                                contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                                if np.sum(mask) > 0:
+                                    color_mask = np.zeros_like(overlay_img)
+                                    color_mask[mask > 0] = [255, 0, 162]
+                                    overlay_img = cv2.addWeighted(overlay_img, 0.75, color_mask, 0.25, 0)
+                                    cv2.drawContours(overlay_img, contours, -1, (0, 255, 0), 2)
+
+                            st.subheader("Segmentation Result")
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.image(box_img, caption="1. Your Bounding Box Prompt", use_container_width=True)
+                            with col2:
+                                st.image(overlay_img, caption="2. MedSAM Target Segmentation", use_container_width=True)
+
+                            if contours:
+                                largest_contour = max(contours, key=cv2.contourArea)
+                                tumor_pixel_count = np.sum(mask == 1)
+                                tumor_area = tumor_pixel_count * (pixel_spacing_mm ** 2)
+                                _, _, w_c, h_c = cv2.boundingRect(largest_contour)
+                                width_val = w_c * pixel_spacing_mm
+                                height_val = h_c * pixel_spacing_mm
+                                (_, _), radius = cv2.minEnclosingCircle(largest_contour)
+                                max_dia_val = (radius * 2) * pixel_spacing_mm
+                                unit = "mm" if pixel_spacing_mm != 1.0 else "pixels"
+
+                                st.subheader("Tumor Metrics")
+                                m1, m2, m3, m4 = st.columns(4)
+                                m1.metric("Area", f"{tumor_area:.2f} {unit}²")
+                                m2.metric("Width", f"{width_val:.2f} {unit}")
+                                m3.metric("Height", f"{height_val:.2f} {unit}")
+                                m4.metric("Max Diameter", f"{max_dia_val:.2f} {unit}")
+
+                            buf_seg = io.BytesIO()
+                            Image.fromarray(overlay_img).save(buf_seg, format="PNG")
+                            st.download_button(
+                                label="Download Segmentation Result",
+                                data=buf_seg.getvalue(),
+                                file_name="segmentation_" + uploaded_file.name.rsplit(".", 1)[0] + ".png",
+                                mime="image/png"
+                            )
+
+                    except ImportError:
+                        st.error("MedSAM not installed. Add segment-anything and medsam to requirements.txt.")
+                    except Exception as e:
+                        st.error(f"MedSAM error: {e}")
 
         else:
             st.success("Clear scan — MedSAM segmentation not required.")
