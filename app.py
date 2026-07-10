@@ -10,41 +10,11 @@ import base64
 import pydicom
 from sklearn.cluster import KMeans
 import matplotlib.pyplot as plt
-from bbox import draw_bbox
 
 st.set_page_config(page_title="Medical Image Viewer", layout="wide")
 st.title("My Streamlit Image Viewer")
 
-MEDSAM_CHECKPOINT = "medsam_vit_b.pth"
-MEDSAM_CHECKPOINT_URL = "https://zenodo.org/records/10689643/files/medsam_vit_b.pth?download=1"
-
-
-@st.cache_resource(show_spinner="Loading MedSAM (first run only — checkpoint is several GB, this can take a bit)...")
-def load_medsam_model():
-    """
-    Downloads (if needed) and loads MedSAM ONCE per running app process.
-    st.cache_resource means every later "Run MedSAM" click reuses this
-    same in-memory model instead of re-downloading/re-loading it from
-    disk every time -- that repeated reload on every click was almost
-    certainly what was hanging/crashing the app before.
-    """
-    import torch
-    from segment_anything import sam_model_registry
-
-    if not os.path.exists(MEDSAM_CHECKPOINT):
-        ret = os.system(f'curl -L -o {MEDSAM_CHECKPOINT} "{MEDSAM_CHECKPOINT_URL}"')
-        if ret != 0 or not os.path.exists(MEDSAM_CHECKPOINT):
-            raise RuntimeError(
-                "Failed to download the MedSAM checkpoint. This file is several GB -- "
-                "check disk space and connection, not just network reachability."
-            )
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = sam_model_registry["vit_b"](checkpoint=MEDSAM_CHECKPOINT)
-    model.to(device)
-    model.eval()
-    return model, device
-
+MOBILESAM_CHECKPOINT = "mobile_sam.pt"
 
 # ==========================================
 # --- 1. UPLOAD IMAGE ---
@@ -310,73 +280,176 @@ if uploaded_file is not None:
         st.divider()
 
         # ==========================================
-        # --- 6. BOUNDING BOX + MEDSAM ---
+        # --- 6. BOUNDING BOX + MOBILESAM ---
         # ==========================================
         if detected_class != "notumor":
-            st.header("6. Tumor Segmentation (MedSAM)")
-            st.caption(f"A **{class_name}** was detected. Draw a bounding box around the tumor, confirm it, then click **Run MedSAM**.")
+            st.header("6. Tumor Segmentation (MobileSAM)")
+            st.caption(f"A **{class_name}** was detected. Draw a bounding box around the tumor, confirm it, then click **Run Segmentation**.")
 
             img_rgb = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
             h_orig, w_orig = img_rgb.shape[:2]
 
-            bbox = draw_bbox(img_rgb, key="medsam")
+            DISPLAY_W = 512
+            display_h = int(h_orig * DISPLAY_W / w_orig)
+            display_img = Image.fromarray(img_rgb).resize((DISPLAY_W, display_h))
+            buf_b64 = io.BytesIO()
+            display_img.save(buf_b64, format="PNG")
+            img_b64 = base64.b64encode(buf_b64.getvalue()).decode()
 
-            if bbox:
-                preview = img_rgb.copy()
-                cv2.rectangle(preview, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (0, 255, 255), 3)
-                st.image(preview, caption=f"Box: {bbox}", use_container_width=True)
+            scale_x = round(w_orig / DISPLAY_W, 6)
+            scale_y = round(h_orig / display_h, 6)
 
-            run_medsam = st.button("Run MedSAM")
+            canvas_html = f"""
+            <style>
+                #bbox_canvas {{ border: 2px solid #00bfff; cursor: crosshair; display: block; }}
+                #coord_display {{ font-family: monospace; font-size: 12px; color: #555;
+                    margin-top: 6px; min-height: 18px; }}
+                #confirm_btn {{
+                    margin-top: 10px; padding: 10px 24px; background: #00bfff;
+                    color: white; border: none; border-radius: 6px;
+                    cursor: pointer; font-size: 15px; font-weight: bold;
+                }}
+                #confirm_btn:hover {{ background: #0099cc; }}
+                #status_msg {{ margin-top: 8px; font-size: 13px;
+                    font-weight: bold; color: green; min-height: 20px; }}
+            </style>
+            <div style="font-family:sans-serif;">
+                <p style="font-size:13px;color:#555;margin-bottom:6px;">
+                    Click and drag to draw a box, then click <b>Confirm Bounding Box</b>.
+                </p>
+                <canvas id="bbox_canvas" width="{DISPLAY_W}" height="{display_h}"></canvas>
+                <div id="coord_display"></div>
+                <button id="confirm_btn" onclick="confirmBox()">Confirm Bounding Box</button>
+                <div id="status_msg"></div>
+            </div>
+            <script>
+            (function() {{
+                const canvas = document.getElementById('bbox_canvas');
+                const ctx = canvas.getContext('2d');
+                const img = new Image();
+                let startX, startY, isDrawing = false;
+                let box = null;
 
-            if run_medsam:
+                img.onload = () => ctx.drawImage(img, 0, 0);
+                img.src = 'data:image/png;base64,{img_b64}';
+
+                canvas.addEventListener('mousedown', e => {{
+                    const r = canvas.getBoundingClientRect();
+                    startX = e.clientX - r.left;
+                    startY = e.clientY - r.top;
+                    isDrawing = true;
+                }});
+
+                canvas.addEventListener('mousemove', e => {{
+                    if (!isDrawing) return;
+                    const r = canvas.getBoundingClientRect();
+                    const cx = e.clientX - r.left;
+                    const cy = e.clientY - r.top;
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                    ctx.drawImage(img, 0, 0);
+                    ctx.strokeStyle = '#00ffff';
+                    ctx.lineWidth = 2;
+                    ctx.setLineDash([5, 3]);
+                    ctx.strokeRect(startX, startY, cx - startX, cy - startY);
+                    box = {{
+                        x1: Math.round(Math.min(startX, cx)),
+                        y1: Math.round(Math.min(startY, cy)),
+                        x2: Math.round(Math.max(startX, cx)),
+                        y2: Math.round(Math.max(startY, cy))
+                    }};
+                    document.getElementById('coord_display').innerText =
+                        'Box: (' + box.x1 + ', ' + box.y1 + ') → (' + box.x2 + ', ' + box.y2 + ')';
+                }});
+
+                canvas.addEventListener('mouseup', () => {{ isDrawing = false; }});
+
+                window.confirmBox = function() {{
+                    if (!box) {{ alert('Please draw a bounding box first.'); return; }}
+                    const x1 = Math.round(box.x1 * {scale_x});
+                    const y1 = Math.round(box.y1 * {scale_y});
+                    const x2 = Math.round(box.x2 * {scale_x});
+                    const y2 = Math.round(box.y2 * {scale_y});
+                    const val = x1 + ',' + y1 + ',' + x2 + ',' + y2;
+                    const inputs = window.parent.document.querySelectorAll('input[type="text"]');
+                    for (let inp of inputs) {{
+                        if (inp.placeholder === '__bbox_receiver__') {{
+                            const setter = Object.getOwnPropertyDescriptor(
+                                window.HTMLInputElement.prototype, 'value').set;
+                            setter.call(inp, val);
+                            inp.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                            document.getElementById('status_msg').innerText =
+                                '✅ Box confirmed! Now click Run Segmentation below.';
+                            return;
+                        }}
+                    }}
+                    document.getElementById('status_msg').innerText =
+                        '✅ Coords: ' + val + ' — paste into the box below and press Enter.';
+                }};
+            }})();
+            </script>
+            """
+
+            components.html(canvas_html, height=display_h + 140)
+
+            bbox_raw = st.text_input(
+                "bbox",
+                placeholder="__bbox_receiver__",
+                key="bbox_receiver",
+                label_visibility="collapsed"
+            )
+
+            bbox = None
+            if bbox_raw and bbox_raw != "__bbox_receiver__":
+                try:
+                    parts = [int(x.strip()) for x in bbox_raw.split(",")]
+                    if len(parts) == 4:
+                        bbox = parts
+                        preview = img_rgb.copy()
+                        cv2.rectangle(preview, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (0, 255, 255), 3)
+                        st.image(preview, caption=f"Box: {bbox}", use_container_width=True)
+                except Exception:
+                    pass
+
+            run_seg = st.button("Run Segmentation")
+
+            if run_seg:
                 if not bbox:
                     st.warning("Draw and confirm a bounding box first.")
                 else:
+                    # Download MobileSAM checkpoint if not present (~9MB)
+                    if not os.path.exists(MOBILESAM_CHECKPOINT):
+                        with st.spinner("Downloading MobileSAM checkpoint (~9MB)..."):
+                            ret = os.system(
+                                f'curl -L -o {MOBILESAM_CHECKPOINT} '
+                                '"https://github.com/ChaoningZhang/MobileSAM/raw/master/weights/mobile_sam.pt"'
+                            )
+                            if ret != 0 or not os.path.exists(MOBILESAM_CHECKPOINT):
+                                st.error("Failed to download MobileSAM checkpoint.")
+                                st.stop()
+
                     try:
                         import torch
+                        from mobile_sam import sam_model_registry, SamPredictor
 
-                        with st.spinner("Running MedSAM segmentation..."):
-                            medsam, device = load_medsam_model()
+                        with st.spinner("Running segmentation..."):
+                            device = "cuda" if torch.cuda.is_available() else "cpu"
 
-                            img_1024 = cv2.resize(img_rgb, (1024, 1024))
-                            img_1024_normalized = (img_1024 - img_1024.min()) / (img_1024.max() - img_1024.min() + 1e-10)
-                            img_tensor = torch.tensor(img_1024_normalized, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0).to(device)
+                            sam = sam_model_registry["vit_t"](checkpoint=MOBILESAM_CHECKPOINT)
+                            sam.to(device)
+                            sam.eval()
 
-                            # Cache the embedding (the expensive ViT forward pass) per
-                            # image, so re-clicking Run MedSAM with a different box on
-                            # the SAME image doesn't redo it every time.
-                            img_hash = hash(img_rgb.tobytes())
-                            embed_cache = st.session_state.setdefault("medsam_embed_cache", {})
-                            if img_hash not in embed_cache:
-                                embed_cache.clear()  # keep only the current image's embedding in memory
-                                with torch.no_grad():
-                                    embed_cache[img_hash] = medsam.image_encoder(img_tensor)
-                            image_embedding = embed_cache[img_hash]
+                            predictor = SamPredictor(sam)
+                            predictor.set_image(img_rgb)
 
-                            bbox_arr = np.array(bbox)
-                            scale_x_sam = 1024 / w_orig
-                            scale_y_sam = 1024 / h_orig
-                            scaled_bbox = bbox_arr * np.array([scale_x_sam, scale_y_sam, scale_x_sam, scale_y_sam])
-                            box_tensor = torch.tensor(scaled_bbox, dtype=torch.float32).unsqueeze(0).to(device)
-
-                            with torch.no_grad():
-                                sparse_embeddings, dense_embeddings = medsam.prompt_encoder(
-                                    points=None, boxes=box_tensor, masks=None
-                                )
-                                low_res_masks, _ = medsam.mask_decoder(
-                                    image_embeddings=image_embedding,
-                                    image_pe=medsam.prompt_encoder.get_dense_pe(),
-                                    sparse_prompt_embeddings=sparse_embeddings,
-                                    dense_prompt_embeddings=dense_embeddings,
-                                    multimask_output=False,
-                                )
-
-                            low_res_np = low_res_masks.squeeze().cpu().numpy()
-                            mask = cv2.resize(
-                                (low_res_np > 0.0).astype(np.uint8),
-                                (w_orig, h_orig),
-                                interpolation=cv2.INTER_NEAREST
+                            input_box = np.array([[bbox[0], bbox[1], bbox[2], bbox[3]]])
+                            masks, scores, _ = predictor.predict(
+                                point_coords=None,
+                                point_labels=None,
+                                box=input_box,
+                                multimask_output=False,
                             )
+
+                            mask = masks[0].astype(np.uint8)
 
                             box_img = img_rgb.copy()
                             cv2.rectangle(box_img, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (0, 255, 255), 3)
@@ -394,7 +467,7 @@ if uploaded_file is not None:
                         with col1:
                             st.image(box_img, caption="Bounding Box Prompt", use_container_width=True)
                         with col2:
-                            st.image(overlay_img, caption="MedSAM Segmentation", use_container_width=True)
+                            st.image(overlay_img, caption="Segmentation", use_container_width=True)
 
                         if contours:
                             largest = max(contours, key=cv2.contourArea)
@@ -423,9 +496,9 @@ if uploaded_file is not None:
                         )
 
                     except ImportError:
-                        st.error("segment-anything not installed. Add `git+https://github.com/facebookresearch/segment-anything.git` to requirements.txt")
+                        st.error("MobileSAM not installed. Add `mobile-sam` to requirements.txt")
                     except Exception as e:
-                        st.error(f"MedSAM error: {e}")
+                        st.error(f"Segmentation error: {e}")
 
         else:
             st.success("Clear scan — no tumor detected.")
