@@ -95,12 +95,26 @@ def draw_bbox(img_array: np.ndarray, key: str = "bbox") -> list:
                 x2: Math.round(box.x2 * {scale_x}),
                 y2: Math.round(box.y2 * {scale_y})
             }};
-            // Send to Streamlit via query param workaround
-            const url = new URL(window.location.href);
-            url.searchParams.set('bbox_{key}', JSON.stringify(scaled));
-            window.history.replaceState(null, '', url.toString());
+            const val = scaled.x1 + ',' + scaled.y1 + ',' + scaled.x2 + ',' + scaled.y2;
+            // Write into the hidden Streamlit text_input below and fire a
+            // real input event so Streamlit's React frontend detects the
+            // change and reruns the script. Just editing the URL (the old
+            // approach) never triggers a rerun, so the box silently never
+            // reached Python.
+            const inputs = window.parent.document.querySelectorAll('input[type="text"]');
+            for (let inp of inputs) {{
+                if (inp.placeholder === '__bbox_receiver_{key}__') {{
+                    const setter = Object.getOwnPropertyDescriptor(
+                        window.HTMLInputElement.prototype, 'value').set;
+                    setter.call(inp, val);
+                    inp.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    document.getElementById('coords_{key}').innerText =
+                        `✅ Confirmed: (${{scaled.x1}}, ${{scaled.y1}}) → (${{scaled.x2}}, ${{scaled.y2}}) — running...`;
+                    return;
+                }}
+            }}
             document.getElementById('coords_{key}').innerText =
-                `✅ Confirmed: (${{scaled.x1}}, ${{scaled.y1}}) → (${{scaled.x2}}, ${{scaled.y2}})`;
+                `Coords ready (${{val}}) but receiver input not found.`;
         }};
     }})();
     </script>
@@ -108,13 +122,18 @@ def draw_bbox(img_array: np.ndarray, key: str = "bbox") -> list:
 
     components.html(html, height=display_h + 100)
 
-    # Read bbox from query params if set
-    params = st.query_params
-    param_key = f"bbox_{key}"
-    if param_key in params:
+    bbox_raw = st.text_input(
+        f"bbox_{key}",
+        placeholder=f"__bbox_receiver_{key}__",
+        key=f"bbox_receiver_{key}",
+        label_visibility="collapsed",
+    )
+
+    if bbox_raw and not bbox_raw.startswith("__bbox_receiver_"):
         try:
-            coords = json.loads(params[param_key])
-            return [coords["x1"], coords["y1"], coords["x2"], coords["y2"]]
+            parts = [int(x.strip()) for x in bbox_raw.split(",")]
+            if len(parts) == 4:
+                return parts
         except Exception:
             return None
     return None
