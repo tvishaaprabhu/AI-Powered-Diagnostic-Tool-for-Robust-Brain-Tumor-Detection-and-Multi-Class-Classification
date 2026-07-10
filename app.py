@@ -16,6 +16,14 @@ st.set_page_config(page_title="Medical Image Viewer", layout="wide")
 st.title("My Streamlit Image Viewer")
 
 # ==========================================
+# --- MEDSAM CHECKPOINT DOWNLOAD ---
+# ==========================================
+MEDSAM_CHECKPOINT = "medsam_vit_b.pth"
+if not os.path.exists(MEDSAM_CHECKPOINT):
+    with st.spinner("Downloading MedSAM checkpoint (375MB, one-time)..."):
+        os.system(f'wget -q -O {MEDSAM_CHECKPOINT} "https://zenodo.org/records/10689643/files/medsam_vit_b.pth?download=1"')
+
+# ==========================================
 # --- 1. UPLOAD IMAGE ---
 # ==========================================
 st.header("1. Upload Image")
@@ -279,11 +287,11 @@ if uploaded_file is not None:
         st.divider()
 
         # ==========================================
-        # --- 6. BOUNDING BOX ---
+        # --- 6. BOUNDING BOX + MEDSAM ---
         # ==========================================
         if detected_class != "notumor":
-            st.header("6. Draw Bounding Box")
-            st.caption(f"A **{class_name}** was detected. Draw a bounding box around the tumor on the scan below.")
+            st.header("6. Tumor Segmentation (MedSAM)")
+            st.caption(f"A **{class_name}** was detected. Draw a bounding box around the tumor, then click **Run MedSAM**.")
 
             img_rgb = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
             h_orig, w_orig = img_rgb.shape[:2]
@@ -298,13 +306,8 @@ if uploaded_file is not None:
             scale_x = round(w_orig / DISPLAY_W, 6)
             scale_y = round(h_orig / display_h, 6)
 
-            # Hidden text inputs that JS will fill — Streamlit reads them on rerun
-            if "bbox_json" not in st.session_state:
-                st.session_state.bbox_json = ""
-
             canvas_html = f"""
             <style>
-                #bbox_wrap {{ font-family: sans-serif; }}
                 #bbox_canvas {{ border: 2px solid #00bfff; cursor: crosshair; display: block; }}
                 #coord_display {{ font-family: monospace; font-size: 12px; color: #555; margin-top: 6px; min-height: 18px; }}
                 #confirm_btn {{
@@ -315,9 +318,9 @@ if uploaded_file is not None:
                 #confirm_btn:hover {{ background: #0099cc; }}
                 #status_msg {{ margin-top: 8px; font-size: 13px; font-weight: bold; color: green; min-height: 20px; }}
             </style>
-            <div id="bbox_wrap">
+            <div style="font-family:sans-serif;">
                 <p style="font-size:13px;color:#555;margin-bottom:6px;">
-                    Click and drag to draw a bounding box. Then click <b>Confirm Bounding Box</b>.
+                    Click and drag to draw a bounding box, then click <b>Confirm Bounding Box</b>.
                 </p>
                 <canvas id="bbox_canvas" width="{DISPLAY_W}" height="{display_h}"></canvas>
                 <div id="coord_display"></div>
@@ -373,23 +376,17 @@ if uploaded_file is not None:
                     const x2 = Math.round(box.x2 * {scale_x});
                     const y2 = Math.round(box.y2 * {scale_y});
                     const val = x1 + ',' + y1 + ',' + x2 + ',' + y2;
-
-                    // Find the hidden Streamlit text input and set its value
                     const inputs = window.parent.document.querySelectorAll('input[type="text"]');
-                    let found = false;
                     for (let inp of inputs) {{
                         if (inp.placeholder === '__bbox_receiver__') {{
                             const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
                             setter.call(inp, val);
                             inp.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                            found = true;
-                            break;
+                            document.getElementById('status_msg').innerText = '✅ Box confirmed! Now click Run MedSAM below.';
+                            return;
                         }}
                     }}
-                    document.getElementById('status_msg').innerText =
-                        found
-                        ? '✅ Coordinates sent! Press Enter or click outside to confirm.'
-                        : '✅ Coordinates: ' + val + ' — paste into the box below and press Enter.';
+                    document.getElementById('status_msg').innerText = '✅ Coords: ' + val + ' — paste into the box below.';
                 }};
             }})();
             </script>
@@ -397,9 +394,8 @@ if uploaded_file is not None:
 
             components.html(canvas_html, height=display_h + 140)
 
-            # Receiver input — JS fills this, Streamlit reads it
             bbox_raw = st.text_input(
-                "Bounding box coordinates (auto-filled by canvas):",
+                "bbox",
                 placeholder="__bbox_receiver__",
                 key="bbox_receiver",
                 label_visibility="collapsed"
@@ -411,14 +407,113 @@ if uploaded_file is not None:
                     parts = [int(x.strip()) for x in bbox_raw.split(",")]
                     if len(parts) == 4:
                         bbox = parts
+                        preview = img_rgb.copy()
+                        cv2.rectangle(preview, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (0, 255, 255), 3)
+                        st.image(preview, caption=f"Box: {bbox}", use_container_width=True)
                 except Exception:
                     pass
 
-            if bbox:
-                preview = img_rgb.copy()
-                cv2.rectangle(preview, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (0, 255, 255), 3)
-                st.image(preview, caption=f"Bounding box: x_min={bbox[0]}, y_min={bbox[1]}, x_max={bbox[2]}, y_max={bbox[3]}", use_container_width=True)
-                st.success(f"Box confirmed — ready for MedSAM: {bbox}")
+            run_medsam = st.button("Run MedSAM")
+
+            if run_medsam:
+                if not bbox:
+                    st.warning("Draw and confirm a bounding box first.")
+                elif not os.path.exists(MEDSAM_CHECKPOINT):
+                    st.error("MedSAM checkpoint not found. Wait for it to download and try again.")
+                else:
+                    try:
+                        import torch
+                        from segment_anything import sam_model_registry
+
+                        with st.spinner("Running MedSAM segmentation..."):
+                            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+                            medsam = sam_model_registry["vit_b"](checkpoint=MEDSAM_CHECKPOINT)
+                            medsam.to(device)
+                            medsam.eval()
+
+                            # Scale image to 1024x1024
+                            img_1024 = cv2.resize(img_rgb, (1024, 1024))
+                            img_1024_normalized = (img_1024 - img_1024.min()) / (img_1024.max() - img_1024.min() + 1e-10)
+                            img_tensor = torch.tensor(img_1024_normalized, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0).to(device)
+
+                            # Scale bbox to 1024x1024
+                            bbox_arr = np.array(bbox)
+                            scale_x_sam = 1024 / w_orig
+                            scale_y_sam = 1024 / h_orig
+                            scaled_bbox = bbox_arr * np.array([scale_x_sam, scale_y_sam, scale_x_sam, scale_y_sam])
+                            box_tensor = torch.tensor(scaled_bbox, dtype=torch.float32).unsqueeze(0).to(device)
+
+                            with torch.no_grad():
+                                image_embedding = medsam.image_encoder(img_tensor)
+                                sparse_embeddings, dense_embeddings = medsam.prompt_encoder(
+                                    points=None, boxes=box_tensor, masks=None
+                                )
+                                low_res_masks, _ = medsam.mask_decoder(
+                                    image_embeddings=image_embedding,
+                                    image_pe=medsam.prompt_encoder.get_dense_pe(),
+                                    sparse_prompt_embeddings=sparse_embeddings,
+                                    dense_prompt_embeddings=dense_embeddings,
+                                    multimask_output=False,
+                                )
+
+                            low_res_np = low_res_masks.squeeze().cpu().numpy()
+                            mask = cv2.resize(
+                                (low_res_np > 0.0).astype(np.uint8),
+                                (w_orig, h_orig),
+                                interpolation=cv2.INTER_NEAREST
+                            )
+
+                            # Draw box image
+                            box_img = img_rgb.copy()
+                            cv2.rectangle(box_img, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (0, 255, 255), 3)
+
+                            # Draw segmentation overlay
+                            overlay_img = img_rgb.copy()
+                            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                            if np.sum(mask) > 0:
+                                color_mask = np.zeros_like(overlay_img)
+                                color_mask[mask > 0] = [255, 0, 162]
+                                overlay_img = cv2.addWeighted(overlay_img, 0.75, color_mask, 0.25, 0)
+                                cv2.drawContours(overlay_img, contours, -1, (0, 255, 0), 2)
+
+                        st.subheader("Segmentation Result")
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.image(box_img, caption="Bounding Box Prompt", use_container_width=True)
+                        with col2:
+                            st.image(overlay_img, caption="MedSAM Segmentation", use_container_width=True)
+
+                        if contours:
+                            largest = max(contours, key=cv2.contourArea)
+                            tumor_area = np.sum(mask == 1) * (pixel_spacing_mm ** 2)
+                            _, _, wc, hc = cv2.boundingRect(largest)
+                            width_val = wc * pixel_spacing_mm
+                            height_val = hc * pixel_spacing_mm
+                            (_, _), radius = cv2.minEnclosingCircle(largest)
+                            max_dia = (radius * 2) * pixel_spacing_mm
+                            unit = "mm" if pixel_spacing_mm != 1.0 else "pixels"
+
+                            st.subheader("Tumor Metrics")
+                            m1, m2, m3, m4 = st.columns(4)
+                            m1.metric("Area", f"{tumor_area:.2f} {unit}²")
+                            m2.metric("Width", f"{width_val:.2f} {unit}")
+                            m3.metric("Height", f"{height_val:.2f} {unit}")
+                            m4.metric("Max Diameter", f"{max_dia:.2f} {unit}")
+
+                        buf_seg = io.BytesIO()
+                        Image.fromarray(overlay_img).save(buf_seg, format="PNG")
+                        st.download_button(
+                            label="Download Segmentation",
+                            data=buf_seg.getvalue(),
+                            file_name="segmentation_" + uploaded_file.name.rsplit(".", 1)[0] + ".png",
+                            mime="image/png"
+                        )
+
+                    except ImportError:
+                        st.error("segment-anything not installed. Add `git+https://github.com/facebookresearch/segment-anything.git` to requirements.txt")
+                    except Exception as e:
+                        st.error(f"MedSAM error: {e}")
 
         else:
             st.success("Clear scan — no tumor detected.")
