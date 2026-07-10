@@ -236,7 +236,7 @@ if uploaded_file is not None:
         model_loaded = True
     except Exception as e:
         st.error(f"Could not load model: {e}")
-        st.info("Make sure `brain_tumor_classifier.keras` and `predict.py` are in the same folder as `app.py`.")
+        st.info("Make sure `brain_tumor_detector.keras` and `predict.py` are in the same folder as `app.py`.")
         model_loaded = False
 
     if model_loaded:
@@ -283,130 +283,123 @@ if uploaded_file is not None:
         # ==========================================
         if detected_class != "notumor":
             st.header("6. Draw Bounding Box")
-            st.caption(f"A **{class_name}** was detected. Draw a bounding box around the tumor, then click **Confirm Bounding Box** in the canvas — coordinates will appear below.")
+            st.caption(f"A **{class_name}** was detected. Draw a bounding box around the tumor, then click **Confirm Bounding Box**. The page will reload with your coordinates.")
 
             img_rgb = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
             h_orig, w_orig = img_rgb.shape[:2]
 
-            DISPLAY_W = 512
-            display_h = int(h_orig * DISPLAY_W / w_orig)
-            display_img = Image.fromarray(img_rgb).resize((DISPLAY_W, display_h))
-            buf_b64 = io.BytesIO()
-            display_img.save(buf_b64, format="PNG")
-            img_b64 = base64.b64encode(buf_b64.getvalue()).decode()
-
-            scale_x = round(w_orig / DISPLAY_W, 4)
-            scale_y = round(h_orig / display_h, 4)
-
-            canvas_html = f"""
-            <div style="font-family:sans-serif;">
-                <p style="font-size:13px;color:#555;margin-bottom:6px;">
-                    Click and drag to draw a box. Then click <b>Confirm Bounding Box</b>.
-                </p>
-                <canvas id="bbox_canvas" width="{DISPLAY_W}" height="{display_h}"
-                    style="border:2px solid #00bfff;cursor:crosshair;display:block;"></canvas>
-                <div id="coord_display" style="font-family:monospace;font-size:12px;
-                    color:#333;margin-top:6px;min-height:18px;"></div>
-                <div style="margin-top:8px;">
-                    <button onclick="confirmBox()" style="padding:8px 20px;
-                        background:#00bfff;color:white;border:none;border-radius:4px;
-                        cursor:pointer;font-size:14px;font-weight:bold;">
-                        Confirm Bounding Box
-                    </button>
-                    <span id="confirm_msg" style="margin-left:12px;color:green;
-                        font-weight:bold;font-size:13px;"></span>
-                </div>
-                <div id="result_display" style="font-family:monospace;font-size:13px;
-                    color:#006600;margin-top:8px;font-weight:bold;min-height:20px;"></div>
-            </div>
-
-            <script>
-            (function() {{
-                const canvas = document.getElementById('bbox_canvas');
-                const ctx = canvas.getContext('2d');
-                const img = new Image();
-                let startX, startY, isDrawing = false;
-                let box = null;
-
-                img.onload = () => ctx.drawImage(img, 0, 0);
-                img.src = 'data:image/png;base64,{img_b64}';
-
-                canvas.addEventListener('mousedown', e => {{
-                    const r = canvas.getBoundingClientRect();
-                    startX = e.clientX - r.left;
-                    startY = e.clientY - r.top;
-                    isDrawing = true;
-                }});
-
-                canvas.addEventListener('mousemove', e => {{
-                    if (!isDrawing) return;
-                    const r = canvas.getBoundingClientRect();
-                    const cx = e.clientX - r.left;
-                    const cy = e.clientY - r.top;
-                    ctx.clearRect(0, 0, canvas.width, canvas.height);
-                    ctx.drawImage(img, 0, 0);
-                    ctx.strokeStyle = '#00ffff';
-                    ctx.lineWidth = 2;
-                    ctx.setLineDash([5, 3]);
-                    ctx.strokeRect(startX, startY, cx - startX, cy - startY);
-                    box = {{
-                        x1: Math.round(Math.min(startX, cx)),
-                        y1: Math.round(Math.min(startY, cy)),
-                        x2: Math.round(Math.max(startX, cx)),
-                        y2: Math.round(Math.max(startY, cy))
-                    }};
-                    document.getElementById('coord_display').innerText =
-                        'Drawing: (' + box.x1 + ', ' + box.y1 + ') → (' + box.x2 + ', ' + box.y2 + ')';
-                }});
-
-                canvas.addEventListener('mouseup', () => {{ isDrawing = false; }});
-
-                window.confirmBox = function() {{
-                    if (!box) {{ alert('Draw a box first.'); return; }}
-                    const scaled = {{
-                        x1: Math.round(box.x1 * {scale_x}),
-                        y1: Math.round(box.y1 * {scale_y}),
-                        x2: Math.round(box.x2 * {scale_x}),
-                        y2: Math.round(box.y2 * {scale_y})
-                    }};
-                    // Store in sessionStorage so Streamlit text input can pick it up
-                    sessionStorage.setItem('bbox_confirmed', JSON.stringify(scaled));
-                    document.getElementById('confirm_msg').innerText = '✅ Box confirmed!';
-                    document.getElementById('result_display').innerText =
-                        'Coordinates (original px): x_min=' + scaled.x1 +
-                        ' y_min=' + scaled.y1 + ' x_max=' + scaled.x2 + ' y_max=' + scaled.y2;
-                    // Auto-fill the hidden input and submit
-                    const inp = window.parent.document.querySelector('input[data-testid="stTextInput"]');
-                    if (inp) {{
-                        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                        nativeInputValueSetter.call(inp, JSON.stringify(scaled));
-                        inp.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                    }}
-                }};
-            }})();
-            </script>
-            """
-
-            components.html(canvas_html, height=display_h + 130)
-
-            st.caption("After confirming the box above, paste the coordinates here and press Enter:")
-            bbox_input = st.text_input(
-                "Bounding box (auto-filled after confirm, or paste manually):",
-                placeholder='{"x1":50,"y1":60,"x2":150,"y2":180}',
-                label_visibility="collapsed"
-            )
-
+            # Check if bbox already confirmed via query params
+            params = st.query_params
             bbox = None
-            if bbox_input:
+            if "x1" in params:
                 try:
-                    coords = json.loads(bbox_input)
-                    bbox = [int(coords["x1"]), int(coords["y1"]), int(coords["x2"]), int(coords["y2"])]
-                    preview = img_rgb.copy()
-                    cv2.rectangle(preview, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (0, 255, 255), 3)
-                    st.image(preview, caption=f"Preview — box: {bbox}", use_container_width=True)
-                    st.success(f"Bounding box ready: x_min={bbox[0]}, y_min={bbox[1]}, x_max={bbox[2]}, y_max={bbox[3]}")
+                    bbox = [
+                        int(params["x1"]),
+                        int(params["y1"]),
+                        int(params["x2"]),
+                        int(params["y2"])
+                    ]
                 except Exception:
-                    st.warning("Could not parse coordinates. Make sure the JSON is valid.")
+                    bbox = None
+
+            if bbox:
+                # Show confirmed bbox
+                preview = img_rgb.copy()
+                cv2.rectangle(preview, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (0, 255, 255), 3)
+                st.image(preview, caption=f"Confirmed bounding box: {bbox}", use_container_width=True)
+                st.success(f"Box ready: x_min={bbox[0]}, y_min={bbox[1]}, x_max={bbox[2]}, y_max={bbox[3]}")
+                if st.button("Redraw bounding box"):
+                    st.query_params.clear()
+                    st.rerun()
+            else:
+                # Show drawing canvas
+                DISPLAY_W = 512
+                display_h = int(h_orig * DISPLAY_W / w_orig)
+                display_img = Image.fromarray(img_rgb).resize((DISPLAY_W, display_h))
+                buf_b64 = io.BytesIO()
+                display_img.save(buf_b64, format="PNG")
+                img_b64 = base64.b64encode(buf_b64.getvalue()).decode()
+
+                scale_x = round(w_orig / DISPLAY_W, 6)
+                scale_y = round(h_orig / display_h, 6)
+
+                canvas_html = f"""
+                <div style="font-family:sans-serif;">
+                    <p style="font-size:13px;color:#555;margin-bottom:6px;">
+                        Click and drag to draw a box around the tumor. Click <b>Confirm Bounding Box</b> when done — the page will reload automatically.
+                    </p>
+                    <canvas id="bbox_canvas" width="{DISPLAY_W}" height="{display_h}"
+                        style="border:2px solid #00bfff;cursor:crosshair;display:block;"></canvas>
+                    <div id="coord_display" style="font-family:monospace;font-size:12px;
+                        color:#555;margin-top:6px;min-height:18px;"></div>
+                    <div style="margin-top:8px;">
+                        <button onclick="confirmBox()" style="padding:8px 20px;
+                            background:#00bfff;color:white;border:none;border-radius:4px;
+                            cursor:pointer;font-size:14px;font-weight:bold;">
+                            Confirm Bounding Box
+                        </button>
+                    </div>
+                </div>
+
+                <script>
+                (function() {{
+                    const canvas = document.getElementById('bbox_canvas');
+                    const ctx = canvas.getContext('2d');
+                    const img = new Image();
+                    let startX, startY, isDrawing = false;
+                    let box = null;
+
+                    img.onload = () => ctx.drawImage(img, 0, 0);
+                    img.src = 'data:image/png;base64,{img_b64}';
+
+                    canvas.addEventListener('mousedown', e => {{
+                        const r = canvas.getBoundingClientRect();
+                        startX = e.clientX - r.left;
+                        startY = e.clientY - r.top;
+                        isDrawing = true;
+                    }});
+
+                    canvas.addEventListener('mousemove', e => {{
+                        if (!isDrawing) return;
+                        const r = canvas.getBoundingClientRect();
+                        const cx = e.clientX - r.left;
+                        const cy = e.clientY - r.top;
+                        ctx.clearRect(0, 0, canvas.width, canvas.height);
+                        ctx.drawImage(img, 0, 0);
+                        ctx.strokeStyle = '#00ffff';
+                        ctx.lineWidth = 2;
+                        ctx.setLineDash([5, 3]);
+                        ctx.strokeRect(startX, startY, cx - startX, cy - startY);
+                        box = {{
+                            x1: Math.round(Math.min(startX, cx)),
+                            y1: Math.round(Math.min(startY, cy)),
+                            x2: Math.round(Math.max(startX, cx)),
+                            y2: Math.round(Math.max(startY, cy))
+                        }};
+                        document.getElementById('coord_display').innerText =
+                            'Box: (' + box.x1 + ', ' + box.y1 + ') → (' + box.x2 + ', ' + box.y2 + ')';
+                    }});
+
+                    canvas.addEventListener('mouseup', () => {{ isDrawing = false; }});
+
+                    window.confirmBox = function() {{
+                        if (!box) {{ alert('Please draw a bounding box first.'); return; }}
+                        const x1 = Math.round(box.x1 * {scale_x});
+                        const y1 = Math.round(box.y1 * {scale_y});
+                        const x2 = Math.round(box.x2 * {scale_x});
+                        const y2 = Math.round(box.y2 * {scale_y});
+                        const url = new URL(window.parent.location.href);
+                        url.searchParams.set('x1', x1);
+                        url.searchParams.set('y1', y1);
+                        url.searchParams.set('x2', x2);
+                        url.searchParams.set('y2', y2);
+                        window.parent.location.href = url.toString();
+                    }};
+                }})();
+                </script>
+                """
+
+                components.html(canvas_html, height=display_h + 120)
 
         else:
             st.success("Clear scan — no tumor detected.")
