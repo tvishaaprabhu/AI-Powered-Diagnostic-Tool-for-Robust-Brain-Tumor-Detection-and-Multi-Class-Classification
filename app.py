@@ -14,19 +14,7 @@ import matplotlib.pyplot as plt
 st.set_page_config(page_title="Medical Image Viewer", layout="wide")
 st.title("My Streamlit Image Viewer")
 
-# ==========================================
-# --- MEDSAM CHECKPOINT DOWNLOAD ---
-# ==========================================
 MEDSAM_CHECKPOINT = "medsam_vit_b.pth"
-
-@st.cache_resource
-def download_medsam():
-    if not os.path.exists(MEDSAM_CHECKPOINT):
-        with st.spinner("Downloading MedSAM checkpoint (375MB, one-time)..."):
-            os.system(f'curl -L -o {MEDSAM_CHECKPOINT} "https://zenodo.org/records/10689643/files/medsam_vit_b.pth?download=1"')
-    return os.path.exists(MEDSAM_CHECKPOINT)
-
-medsam_ready = download_medsam()
 
 # ==========================================
 # --- 1. UPLOAD IMAGE ---
@@ -427,9 +415,15 @@ if uploaded_file is not None:
             if run_medsam:
                 if not bbox:
                     st.warning("Draw and confirm a bounding box first.")
-                elif not medsam_ready:
-                    st.error("MedSAM checkpoint not ready yet — please wait and try again.")
                 else:
+                    # Download checkpoint only when user actually clicks Run MedSAM
+                    if not os.path.exists(MEDSAM_CHECKPOINT):
+                        with st.spinner("Downloading MedSAM checkpoint (375MB, one-time)..."):
+                            ret = os.system(f'curl -L -o {MEDSAM_CHECKPOINT} "https://zenodo.org/records/10689643/files/medsam_vit_b.pth?download=1"')
+                            if ret != 0 or not os.path.exists(MEDSAM_CHECKPOINT):
+                                st.error("Failed to download MedSAM checkpoint. Check your internet connection.")
+                                st.stop()
+
                     try:
                         import torch
                         from segment_anything import sam_model_registry
