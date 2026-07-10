@@ -231,7 +231,7 @@ if uploaded_file is not None:
 
     try:
         from predict import load_model, preprocess, predict, get_gradcam, overlay_gradcam, CLASS_NAMES
-        MODEL_PATH = "brain_tumor_detector.keras"
+        MODEL_PATH = "brain_tumor_classifier.keras"
         model = load_model(MODEL_PATH)
         model_loaded = True
     except Exception as e:
@@ -279,11 +279,11 @@ if uploaded_file is not None:
         st.divider()
 
         # ==========================================
-        # --- 6. BOUNDING BOX (for MedSAM) ---
+        # --- 6. BOUNDING BOX ---
         # ==========================================
         if detected_class != "notumor":
             st.header("6. Draw Bounding Box")
-            st.caption(f"A **{class_name}** was detected. Draw a bounding box around the tumor region below, then click **Confirm Bounding Box**.")
+            st.caption(f"A **{class_name}** was detected. Draw a bounding box around the tumor, then click **Confirm Bounding Box** in the canvas — coordinates will appear below.")
 
             img_rgb = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
             h_orig, w_orig = img_rgb.shape[:2]
@@ -295,25 +295,29 @@ if uploaded_file is not None:
             display_img.save(buf_b64, format="PNG")
             img_b64 = base64.b64encode(buf_b64.getvalue()).decode()
 
-            scale_x = w_orig / DISPLAY_W
-            scale_y = h_orig / display_h
+            scale_x = round(w_orig / DISPLAY_W, 4)
+            scale_y = round(h_orig / display_h, 4)
 
             canvas_html = f"""
             <div style="font-family:sans-serif;">
                 <p style="font-size:13px;color:#555;margin-bottom:6px;">
-                    Click and drag to draw a bounding box. Click <b>Confirm</b> when done.
+                    Click and drag to draw a box. Then click <b>Confirm Bounding Box</b>.
                 </p>
                 <canvas id="bbox_canvas" width="{DISPLAY_W}" height="{display_h}"
                     style="border:2px solid #00bfff;cursor:crosshair;display:block;"></canvas>
                 <div id="coord_display" style="font-family:monospace;font-size:12px;
                     color:#333;margin-top:6px;min-height:18px;"></div>
-                <button onclick="confirmBox()" style="margin-top:8px;padding:8px 20px;
-                    background:#00bfff;color:white;border:none;border-radius:4px;
-                    cursor:pointer;font-size:14px;font-weight:bold;">
-                    Confirm Bounding Box
-                </button>
-                <span id="confirm_msg" style="margin-left:12px;color:green;
-                    font-weight:bold;font-size:13px;"></span>
+                <div style="margin-top:8px;">
+                    <button onclick="confirmBox()" style="padding:8px 20px;
+                        background:#00bfff;color:white;border:none;border-radius:4px;
+                        cursor:pointer;font-size:14px;font-weight:bold;">
+                        Confirm Bounding Box
+                    </button>
+                    <span id="confirm_msg" style="margin-left:12px;color:green;
+                        font-weight:bold;font-size:13px;"></span>
+                </div>
+                <div id="result_display" style="font-family:monospace;font-size:13px;
+                    color:#006600;margin-top:8px;font-weight:bold;min-height:20px;"></div>
             </div>
 
             <script>
@@ -352,47 +356,57 @@ if uploaded_file is not None:
                         y2: Math.round(Math.max(startY, cy))
                     }};
                     document.getElementById('coord_display').innerText =
-                        'Box (display): (' + box.x1 + ', ' + box.y1 + ') → (' + box.x2 + ', ' + box.y2 + ')';
+                        'Drawing: (' + box.x1 + ', ' + box.y1 + ') → (' + box.x2 + ', ' + box.y2 + ')';
                 }});
 
                 canvas.addEventListener('mouseup', () => {{ isDrawing = false; }});
 
                 window.confirmBox = function() {{
-                    if (!box) {{ alert('Please draw a bounding box first.'); return; }}
+                    if (!box) {{ alert('Draw a box first.'); return; }}
                     const scaled = {{
-                        x1: Math.round(box.x1 * {scale_x:.4f}),
-                        y1: Math.round(box.y1 * {scale_y:.4f}),
-                        x2: Math.round(box.x2 * {scale_x:.4f}),
-                        y2: Math.round(box.y2 * {scale_y:.4f})
+                        x1: Math.round(box.x1 * {scale_x}),
+                        y1: Math.round(box.y1 * {scale_y}),
+                        x2: Math.round(box.x2 * {scale_x}),
+                        y2: Math.round(box.y2 * {scale_y})
                     }};
-                    const url = new URL(window.location.href);
-                    url.searchParams.set('bbox', JSON.stringify(scaled));
-                    window.history.replaceState(null, '', url.toString());
-                    document.getElementById('confirm_msg').innerText =
-                        '✅ Confirmed! (' + scaled.x1 + ', ' + scaled.y1 + ') → (' + scaled.x2 + ', ' + scaled.y2 + ')';
+                    // Store in sessionStorage so Streamlit text input can pick it up
+                    sessionStorage.setItem('bbox_confirmed', JSON.stringify(scaled));
+                    document.getElementById('confirm_msg').innerText = '✅ Box confirmed!';
+                    document.getElementById('result_display').innerText =
+                        'Coordinates (original px): x_min=' + scaled.x1 +
+                        ' y_min=' + scaled.y1 + ' x_max=' + scaled.x2 + ' y_max=' + scaled.y2;
+                    // Auto-fill the hidden input and submit
+                    const inp = window.parent.document.querySelector('input[data-testid="stTextInput"]');
+                    if (inp) {{
+                        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                        nativeInputValueSetter.call(inp, JSON.stringify(scaled));
+                        inp.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    }}
                 }};
             }})();
             </script>
             """
 
-            components.html(canvas_html, height=display_h + 110)
+            components.html(canvas_html, height=display_h + 130)
 
-            # Read bbox from query params
+            st.caption("After confirming the box above, paste the coordinates here and press Enter:")
+            bbox_input = st.text_input(
+                "Bounding box (auto-filled after confirm, or paste manually):",
+                placeholder='{"x1":50,"y1":60,"x2":150,"y2":180}',
+                label_visibility="collapsed"
+            )
+
             bbox = None
-            params = st.query_params
-            if "bbox" in params:
+            if bbox_input:
                 try:
-                    coords = json.loads(params["bbox"])
-                    bbox = [coords["x1"], coords["y1"], coords["x2"], coords["y2"]]
-                    st.success(f"Bounding box ready: {bbox}")
+                    coords = json.loads(bbox_input)
+                    bbox = [int(coords["x1"]), int(coords["y1"]), int(coords["x2"]), int(coords["y2"])]
+                    preview = img_rgb.copy()
+                    cv2.rectangle(preview, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (0, 255, 255), 3)
+                    st.image(preview, caption=f"Preview — box: {bbox}", use_container_width=True)
+                    st.success(f"Bounding box ready: x_min={bbox[0]}, y_min={bbox[1]}, x_max={bbox[2]}, y_max={bbox[3]}")
                 except Exception:
-                    bbox = None
-
-            if bbox:
-                # Show preview with box drawn
-                preview = img_rgb.copy()
-                cv2.rectangle(preview, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (0, 255, 255), 3)
-                st.image(preview, caption="Preview with bounding box", use_container_width=True)
+                    st.warning("Could not parse coordinates. Make sure the JSON is valid.")
 
         else:
             st.success("Clear scan — no tumor detected.")
