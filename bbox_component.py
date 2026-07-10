@@ -1,4 +1,4 @@
-'''import streamlit as st
+import streamlit as st
 import streamlit.components.v1 as components
 import base64
 import json
@@ -137,4 +137,4 @@ def draw_bbox(img_array: np.ndarray, key: str = "bbox") -> list:
         except Exception:
             return None
     return None
-'''
+
