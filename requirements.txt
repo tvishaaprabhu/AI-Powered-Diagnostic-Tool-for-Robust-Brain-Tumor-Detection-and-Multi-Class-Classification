@@ -9,4 +9,5 @@ scikit-learn
 matplotlib
 torch
 torchvision
-mobile-sam
+git+https://github.com/ChaoningZhang/MobileSAM.git
+
