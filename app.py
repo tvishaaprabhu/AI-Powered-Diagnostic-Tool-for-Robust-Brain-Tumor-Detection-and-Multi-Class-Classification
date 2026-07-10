@@ -7,7 +7,6 @@ from PIL import Image
 import cv2
 import io
 import base64
-import json
 import pydicom
 from sklearn.cluster import KMeans
 import matplotlib.pyplot as plt
@@ -19,9 +18,15 @@ st.title("My Streamlit Image Viewer")
 # --- MEDSAM CHECKPOINT DOWNLOAD ---
 # ==========================================
 MEDSAM_CHECKPOINT = "medsam_vit_b.pth"
-if not os.path.exists(MEDSAM_CHECKPOINT):
-    with st.spinner("Downloading MedSAM checkpoint (375MB, one-time)..."):
-        os.system(f'wget -q -O {MEDSAM_CHECKPOINT} "https://zenodo.org/records/10689643/files/medsam_vit_b.pth?download=1"')
+
+@st.cache_resource
+def download_medsam():
+    if not os.path.exists(MEDSAM_CHECKPOINT):
+        with st.spinner("Downloading MedSAM checkpoint (375MB, one-time)..."):
+            os.system(f'curl -L -o {MEDSAM_CHECKPOINT} "https://zenodo.org/records/10689643/files/medsam_vit_b.pth?download=1"')
+    return os.path.exists(MEDSAM_CHECKPOINT)
+
+medsam_ready = download_medsam()
 
 # ==========================================
 # --- 1. UPLOAD IMAGE ---
@@ -291,7 +296,7 @@ if uploaded_file is not None:
         # ==========================================
         if detected_class != "notumor":
             st.header("6. Tumor Segmentation (MedSAM)")
-            st.caption(f"A **{class_name}** was detected. Draw a bounding box around the tumor, then click **Run MedSAM**.")
+            st.caption(f"A **{class_name}** was detected. Draw a bounding box around the tumor, confirm it, then click **Run MedSAM**.")
 
             img_rgb = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
             h_orig, w_orig = img_rgb.shape[:2]
@@ -309,25 +314,26 @@ if uploaded_file is not None:
             canvas_html = f"""
             <style>
                 #bbox_canvas {{ border: 2px solid #00bfff; cursor: crosshair; display: block; }}
-                #coord_display {{ font-family: monospace; font-size: 12px; color: #555; margin-top: 6px; min-height: 18px; }}
+                #coord_display {{ font-family: monospace; font-size: 12px; color: #555;
+                    margin-top: 6px; min-height: 18px; }}
                 #confirm_btn {{
-                    margin-top: 10px; padding: 10px 24px;
-                    background: #00bfff; color: white; border: none;
-                    border-radius: 6px; cursor: pointer; font-size: 15px; font-weight: bold;
+                    margin-top: 10px; padding: 10px 24px; background: #00bfff;
+                    color: white; border: none; border-radius: 6px;
+                    cursor: pointer; font-size: 15px; font-weight: bold;
                 }}
                 #confirm_btn:hover {{ background: #0099cc; }}
-                #status_msg {{ margin-top: 8px; font-size: 13px; font-weight: bold; color: green; min-height: 20px; }}
+                #status_msg {{ margin-top: 8px; font-size: 13px;
+                    font-weight: bold; color: green; min-height: 20px; }}
             </style>
             <div style="font-family:sans-serif;">
                 <p style="font-size:13px;color:#555;margin-bottom:6px;">
-                    Click and drag to draw a bounding box, then click <b>Confirm Bounding Box</b>.
+                    Click and drag to draw a box, then click <b>Confirm Bounding Box</b>.
                 </p>
                 <canvas id="bbox_canvas" width="{DISPLAY_W}" height="{display_h}"></canvas>
                 <div id="coord_display"></div>
                 <button id="confirm_btn" onclick="confirmBox()">Confirm Bounding Box</button>
                 <div id="status_msg"></div>
             </div>
-
             <script>
             (function() {{
                 const canvas = document.getElementById('bbox_canvas');
@@ -379,14 +385,17 @@ if uploaded_file is not None:
                     const inputs = window.parent.document.querySelectorAll('input[type="text"]');
                     for (let inp of inputs) {{
                         if (inp.placeholder === '__bbox_receiver__') {{
-                            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                            const setter = Object.getOwnPropertyDescriptor(
+                                window.HTMLInputElement.prototype, 'value').set;
                             setter.call(inp, val);
                             inp.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                            document.getElementById('status_msg').innerText = '✅ Box confirmed! Now click Run MedSAM below.';
+                            document.getElementById('status_msg').innerText =
+                                '✅ Box confirmed! Now click Run MedSAM below.';
                             return;
                         }}
                     }}
-                    document.getElementById('status_msg').innerText = '✅ Coords: ' + val + ' — paste into the box below.';
+                    document.getElementById('status_msg').innerText =
+                        '✅ Coords: ' + val + ' — paste into the box below and press Enter.';
                 }};
             }})();
             </script>
@@ -418,8 +427,8 @@ if uploaded_file is not None:
             if run_medsam:
                 if not bbox:
                     st.warning("Draw and confirm a bounding box first.")
-                elif not os.path.exists(MEDSAM_CHECKPOINT):
-                    st.error("MedSAM checkpoint not found. Wait for it to download and try again.")
+                elif not medsam_ready:
+                    st.error("MedSAM checkpoint not ready yet — please wait and try again.")
                 else:
                     try:
                         import torch
@@ -432,12 +441,10 @@ if uploaded_file is not None:
                             medsam.to(device)
                             medsam.eval()
 
-                            # Scale image to 1024x1024
                             img_1024 = cv2.resize(img_rgb, (1024, 1024))
                             img_1024_normalized = (img_1024 - img_1024.min()) / (img_1024.max() - img_1024.min() + 1e-10)
                             img_tensor = torch.tensor(img_1024_normalized, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0).to(device)
 
-                            # Scale bbox to 1024x1024
                             bbox_arr = np.array(bbox)
                             scale_x_sam = 1024 / w_orig
                             scale_y_sam = 1024 / h_orig
@@ -464,11 +471,9 @@ if uploaded_file is not None:
                                 interpolation=cv2.INTER_NEAREST
                             )
 
-                            # Draw box image
                             box_img = img_rgb.copy()
                             cv2.rectangle(box_img, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (0, 255, 255), 3)
 
-                            # Draw segmentation overlay
                             overlay_img = img_rgb.copy()
                             contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                             if np.sum(mask) > 0:
