@@ -9,5 +9,4 @@ scikit-learn
 matplotlib
 torch
 torchvision
-bbox
-git+https://github.com/facebookresearch/segment-anything.git
+mobile-sam
